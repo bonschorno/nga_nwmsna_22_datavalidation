@@ -1,0 +1,5 @@
+shapefiles/
+samplingframe/
+.Rproj.*
+*.xlsx
+pre_clean_data.csv

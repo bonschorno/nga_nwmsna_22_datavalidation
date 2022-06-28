@@ -1,0 +1,263 @@
+---
+title: "Data Validation Nigeria NW MSNA 2022"
+author: "Colin Walder"
+date: "May 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      message = FALSE, 
+                      warning = FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(sf)
+library(leaflet)
+library(lubridate)
+```
+
+
+```{r, warning=FALSE}
+data_raw <- read_csv("pre_clean_data.csv") %>% 
+  mutate(state_face = ifelse(state_face == "kastina", "katsina", state_face)) %>% 
+  rename(uuid = `_uuid`)
+```
+
+# Overview
+
+## Surveys done/cleaned - Overall
+
+```{r}
+nrow(data_raw)
+```
+## Surveys done/cleaned - IDP
+
+```{r}
+surveys_idps <- data_raw %>% 
+  filter(hh_displacement_status == "yes") %>% 
+  nrow()
+
+surveys_idps
+```
+
+
+```{r}
+#per state
+data_raw %>% 
+  filter(hh_displacement_status == "yes") %>% 
+  group_by(state_face) %>% 
+  count()
+```
+
+## Surveys done/cleaned - Non-IDP
+
+```{r}
+#per state
+data_raw %>% 
+  filter(hh_displacement_status != "yes") %>% 
+  group_by(state_face) %>% 
+  count()
+```
+
+
+# Interviewing rate
+
+```{r}
+data_raw %>% 
+  group_by(today) %>% 
+  count(name = "interviews") %>% 
+  ungroup() %>% 
+  mutate(avg_interviews = mean(interviews)) %>% 
+  ggplot(aes(x = today, y = interviews)) +
+  geom_hline(aes(yintercept = avg_interviews), linetype = "dashed", color = "red") +
+  geom_col() +
+  labs(title = "On average, the teams conduct 100 interviews per day", 
+       subtitle = "With that rate, we need roughly another two weeks",
+       y = "Number of interviews\n",
+       x = "") +
+  theme_minimal()
+```
+
+# Survey metadata
+
+## No duplicates present.
+
+```{r}
+data_raw %>% 
+  group_by(uuid) %>% 
+  count() %>% 
+  filter(n > 2) %>% 
+  nrow()
+```
+
+## Interview speed
+
+```{r}
+median_duration_interview <- round(median(data_raw$start_to_end), digits = 2)
+```
+
+The median duration of an interview was `r median_duration_interview` minutes.
+
+```{r}
+data_raw %>% 
+  filter(start_to_end < quantile(data_raw$start_to_end, probs = 0.90)) %>% 
+  ggplot() +
+  geom_histogram(aes(x = start_to_end)) +
+  labs(x = "Duration (in mins)",
+       y = "n Inteviews\n",
+       title = "Duration of interviews (highest decile excluded)") +
+  theme_minimal()
+
+# distribution 
+quantile(data_raw$start_to_end, probs = seq(0,1,0.05))
+```
+
+# Enumerator metadata
+
+## Identical "survey paths" taken by enumerator?
+
+No.
+
+```{r, message=FALSE}
+data_raw %>% 
+  group_by_all() %>% 
+  count() %>% 
+  filter(n > 2) %>% 
+  nrow()
+```
+
+# Data protection
+
+Tbd.
+
+# Logical checks
+
+Done in previous step.
+
+# GPS coordinates
+
+```{r, fig.height=10, fig.width=10}
+# Validate with actual locations ------------------------------------------
+
+# load kobo data
+data_gps <- read_csv("pre_clean_data.csv") %>% 
+  mutate(state_face = ifelse(state_face == "kastina", "katsina", state_face)) %>%
+  drop_na("_gps_longitude", "_gps_latitude") %>%
+  st_as_sf(coords = c("_gps_longitude", "_gps_latitude"), crs = 4326)
+
+# load in admin1 boundaries
+boundaries_adm1 <- st_read("shapefiles/nga_admbnda_adm1_osgof_20190417.shp") %>% 
+  filter(ADM1_EN %in% c("Sokoto", "Katsina", "Zamfara"))
+  # select(ADM1_EN, ADM2_EN)
+
+# load in admin2 boundaries
+boundaries_adm2 <- st_read("shapefiles/nga_admbnda_adm2_osgof_20190417.shp") %>% 
+  filter(ADM1_EN %in% c("Sokoto", "Katsina", "Zamfara"))
+# select(ADM1_EN, ADM2_EN)
+
+# load files with assigned interview locations
+replacements_shapefile <- read_rds("shapefiles/replacements_kmzfiles.rds")
+
+katsina_shapefile <- read_rds("shapefiles/katsina_kmzfiles.rds")
+katsina_replacements <- replacements_shapefile %>% 
+  filter(str_detect(cluster_name, "Katsina"))
+
+sokoto_shapefile <- read_rds("shapefiles/sokoto_kmzfiles.rds")
+sokoto_replacement <- replacements_shapefile %>% 
+  filter(str_detect(cluster_name, "Sokoto"))
+
+zamfara_shapefile <- read_rds("shapefiles/zamfara_kmzfiles.rds")
+
+all_kmz <- bind_rows(katsina_shapefile, sokoto_shapefile, zamfara_shapefile, replacements_shapefile)
+all_sokoto <- bind_rows(sokoto_shapefile, sokoto_replacement)
+all_katsina <- bind_rows(katsina_shapefile, katsina_replacements)
+
+ggplot() +
+  geom_sf(data = boundaries_adm2, fill = "grey", color = "white", ) +
+  geom_sf(data = boundaries_adm1, fill = NA, color = "black", ) +
+  geom_sf(data = all_kmz, alpha = 0.5) +
+  geom_sf(data = data_gps, aes(color = organisation_of_enumerator), alpha = 0.25) +
+  geom_sf_label(data = boundaries_adm1, aes(label = ADM1_EN)) +
+  labs(title = "Sampled (black) and actual interview locations coloured by organisation",
+       subtitle = "States: Zamfara, Katsina, Sokoto",
+       color = "Enumerator Organisation",
+       y = "",
+       x = "") +
+  theme_minimal()
+```
+
+# Difference between assigned and actual interview locations
+
+## Sokoto
+
+```{r}
+# function
+overlap_interviews <- function(kobodata, name_of_state, shape_file_state, threshold_points = seq(250, 2000, 250)){
+  
+  interviews <- kobodata %>% 
+    filter(state_face == name_of_state)
+  
+  for (threshold in threshold_points) {
+    
+    boundary_list <- st_is_within_distance(x = interviews, y = shape_file_state, dist = threshold)
+    share_within <- sum(lengths(boundary_list) > 0)/nrow(interviews)
+    print(paste("State:", name_of_state, "Share:", round(share_within, digits = 2), "Threshold:", threshold))
+    
+  }
+  
+}
+```
+
+```{r}
+overlap_interviews(data_gps, "sokoto", all_sokoto, threshold = c(250, 500, 1000, 2000))
+```
+
+## Katsina
+
+```{r}
+overlap_interviews(data_gps, "katsina", all_katsina, threshold = c(250, 500, 1000, 2000))
+```
+
+# Double-check with interactive maps
+
+## Yabo
+
+```{r}
+leaflet() %>% 
+  addTiles() %>% 
+  addCircleMarkers(data = subset(data_gps, lga_face == "yabo"), color = "blue") %>% 
+  addCircleMarkers(data = subset(sokoto_shapefile, cluster_name == "Main Sokoto Yabo"), color = "red") %>% 
+  addCircleMarkers(data = subset(replacements_shapefile, cluster_name == "Replacement Sokoto Yabo"), color = "yellow") %>%  
+  addMeasure(primaryLengthUnit = "kilometers")
+```
+
+```{r}
+yabo <- data_gps %>% 
+  filter(lga_face == "yabo")
+
+overlap_interviews(yabo, name_of_state = "sokoto", shape_file_state = sokoto_shapefile, threshold_points = 300)
+overlap_interviews(yabo, name_of_state = "sokoto", shape_file_state = all_sokoto, threshold_points = 300)
+```
+
+## Tambuwal
+
+```{r}
+leaflet() %>% 
+  addTiles() %>% 
+  addCircleMarkers(data = subset(data_gps, lga_face == "tambuwal"), color = "blue") %>% 
+  addCircleMarkers(data = subset(sokoto_shapefile, cluster_name == "Main Sokoto Tambuwal"), color = "red") %>% 
+  addCircleMarkers(data = subset(replacements_shapefile, cluster_name == "Replacement Sokoto Tambuwal"), color = "yellow") %>%  
+  addMeasure(primaryLengthUnit = "kilometers")
+```
+
+```{r}
+tambuwal <- data_gps %>% 
+  filter(lga_face == "tambuwal")
+
+overlap_interviews(tambuwal, name_of_state = "sokoto", shape_file_state = sokoto_shapefile, threshold_points = 300)
+overlap_interviews(tambuwal, name_of_state = "sokoto", shape_file_state = all_sokoto, threshold_points = 300)
+
+```
+
